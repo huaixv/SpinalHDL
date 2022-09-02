@@ -37,6 +37,31 @@ class MainTransformer(val global: Global) extends PluginComponent with Transform
       }
     }
 
+    def valTransform(x: global.Tree, clazz: Symbol, func: Symbol, data: Boolean): Tree = {
+      x match {
+        case vd: ValDef if !vd.mods.isParamAccessor && !vd.symbol.annotations.exists(_.symbol.name.toString == "DontName") && vd.rhs.nonEmpty =>
+          val nameStr = vd.getterName.toString
+          val const = Constant(nameStr)
+          val lit = Literal(const)
+          val thiz = This(clazz)
+          val sel = Select(thiz, func)
+          val appl = Apply(TypeApply(sel, List()), List(vd.rhs, lit))
+
+          thiz.tpe = clazz.tpe
+          sel.tpe = func.tpe
+          appl.tpe = vd.rhs.tpe
+          lit.setType(definitions.StringTpe)
+          treeCopy.ValDef(vd, vd.mods, vd.name, vd.tpt, appl)
+        case dd: DefDef if !data && !dd.symbol.annotations.exists(_.symbol.name.toString == "DontName") && dd.rhs.nonEmpty =>
+          // we don't want `val`s in Data's funcs to appear in its actual elements
+          val rhs = dd.rhs match {
+            case b: Block => Block(b.stats.map(valTransform(_, clazz, func, data)), valTransform(b.expr, clazz, func, data))
+            case x => x
+          }
+          treeCopy.DefDef(dd, dd.mods, dd.name, dd.tparams, dd.vparamss, dd.tpt, rhs)
+        case e => e
+      }
+    }
 
     override def transform(tree: global.Tree): global.Tree = {
       val transformedTree = super.transform(tree)
@@ -59,22 +84,8 @@ class MainTransformer(val global: Global) extends PluginComponent with Transform
           if (symbolHasTrait(cd.symbol, "spinal.idslplugin.ValCallback")) {
             val clazz = cd.impl.symbol.owner
             val func = clazz.tpe.members.find(_.name.toString == "valCallback").get
-            val body = cd.impl.body.map {
-              case vd: ValDef if !vd.mods.isParamAccessor  && !vd.symbol.annotations.exists(_.symbol.name.toString == "DontName") && vd.rhs.nonEmpty =>
-                val nameStr = vd.getterName.toString
-                val const = Constant(nameStr)
-                val lit = Literal(const)
-                val thiz = This(clazz)
-                val sel = Select(thiz, func)
-                val appl = Apply(sel, List(vd.rhs, lit))
-
-                thiz.tpe = clazz.tpe
-                sel.tpe = func.tpe
-                appl.tpe = definitions.UnitTpe
-                lit.setType(definitions.StringTpe)
-                treeCopy.ValDef(vd, vd.mods, vd.name, vd.tpt, appl)
-              case e => e
-            }
+            val data = symbolHasTrait(cd.symbol, "spinal.core.Data")
+            val body = cd.impl.body.map(valTransform(_, clazz, func, data))
             val impl = treeCopy.Template(cd.impl, cd.impl.parents, cd.impl.self, body)
             val cdNew = treeCopy.ClassDef(cd, cd.mods, cd.name, cd.tparams, impl) //)mods0, name0, tparams0, impl0
 
